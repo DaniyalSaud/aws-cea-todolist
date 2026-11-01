@@ -65,6 +65,15 @@ input::placeholder { color: #9aa094; opacity: 1; }
 .task-checkbox:not(:disabled):hover { border-color: #839c72; background: #f3f7ed; }
 .is-completed .task-checkbox { background: #e5eddc; color: #638448; border-color: #e5eddc; }
 .task-title { color: #495248; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; flex: 1; min-width: 0; }
+.task-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.attachment-row { display: flex; gap: 3px; align-items: center; min-width: 0; }
+.attachment-download { display: flex; align-items: center; gap: 5px; color: #6e805e; background: #f1f5eb; border: 1px solid #e6ecde; border-radius: 5px; padding: 4px 6px; font-size: 10px; min-width: 0; max-width: 100%; }
+.attachment-download > svg { flex-shrink: 0; }
+.attachment-download > span:first-of-type { min-width: 0; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-size { flex-shrink: 0; color: #929f83; font-size: 9px; }
+.attachment-download:not(:disabled):hover { background: #e8efdf; color: #45653c; }
+.attachment-remove { display: grid; place-items: center; width: 22px; height: 24px; border: 0; border-radius: 5px; background: transparent; color: #9ca591; flex-shrink: 0; }
+.attachment-remove:not(:disabled):hover { color: #b66d5e; background: #fbefed; }
 .is-completed .task-title { text-decoration: line-through; text-decoration-color: #bec5b6; color: #a4ab9d; }
 .task-actions { display: flex; gap: 2px; margin-left: auto; flex-shrink: 0; }
 .icon-button { display: grid; place-items: center; width: 31px; height: 31px; border: 0; border-radius: 7px; background: transparent; color: #9da595; padding: 0; }
@@ -169,6 +178,8 @@ input::placeholder { color: #9aa094; opacity: 1; }
   .task-list { padding: 0 18px; }
   .task-row { gap: 10px; }
   .task-title { font-size: 12px; }
+  .attachment-size { display: none; }
+  .task-actions { gap: 0; }
   .icon-button { width: 29px; height: 33px; }
   .list-footer { padding-left: 18px; padding-right: 18px; }
   .sidebar { gap: 10px; }

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 test.beforeEach(async ({ request }) => {
   const response = await request.get('/api/todos');
@@ -89,8 +90,47 @@ test('desktop layout renders without browser errors', async ({ page }) => {
     await page.getByRole('button', { name: 'Add task' }).click();
     await expect(page.getByText(title, { exact: true })).toBeVisible();
   }
+  await page.getByLabel('Attachment file: Plan something good for the weekend', { exact: true }).setInputFiles({ name: 'weekend-ideas.txt', mimeType: 'text/plain', buffer: Buffer.from('A few ideas for the weekend') });
+  await expect(page.getByRole('button', { name: 'Download attachment: weekend-ideas.txt', exact: true })).toBeVisible();
   await page.getByRole('checkbox', { name: 'Complete: Make time for a morning walk', exact: true }).click();
   await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '33');
   expect(errors).toEqual([]);
   await page.screenshot({ path: 'test-results/desktop.png', fullPage: true });
+});
+
+test('attaches, downloads, replaces and removes files', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'A fresh start.' })).toBeVisible();
+  await page.getByRole('textbox', { name: 'New task' }).fill('Review the project notes');
+  await page.getByRole('button', { name: 'Add task' }).click();
+  await expect(page.getByText('Review the project notes', { exact: true })).toBeVisible();
+  await page.getByLabel('Attachment file: Review the project notes', { exact: true }).setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Project notes for tomorrow') });
+  await expect(page.getByRole('button', { name: 'Download attachment: notes.txt', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Download attachment: notes.txt', exact: true })).toBeVisible();
+  const downloadReady = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download attachment: notes.txt', exact: true }).click();
+  const download = await downloadReady;
+  expect(download.suggestedFilename()).toBe('notes.txt');
+  expect(await readFile((await download.path())!, 'utf8')).toBe('Project notes for tomorrow');
+  await page.getByLabel('Attachment file: Review the project notes', { exact: true }).setInputFiles({ name: 'updated.txt', mimeType: 'text/plain', buffer: Buffer.from('Updated project notes') });
+  await expect(page.getByRole('button', { name: 'Download attachment: updated.txt', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Download attachment: notes.txt', exact: true })).toBeHidden();
+  await page.getByRole('button', { name: 'Remove attachment: updated.txt', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Download attachment: updated.txt', exact: true })).toBeHidden();
+});
+
+test('preserves an attachment when a replacement upload fails', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'A fresh start.' })).toBeVisible();
+  await page.getByRole('textbox', { name: 'New task' }).fill('Keep my notes');
+  await page.getByRole('button', { name: 'Add task' }).click();
+  await expect(page.getByText('Keep my notes', { exact: true })).toBeVisible();
+  const input = page.getByLabel('Attachment file: Keep my notes', { exact: true });
+  await input.setInputFiles({ name: 'original.txt', mimeType: 'text/plain', buffer: Buffer.from('Original notes') });
+  await expect(page.getByRole('button', { name: 'Download attachment: original.txt', exact: true })).toBeVisible();
+  await page.route('**/api/todos/*/attachment', (route) => route.request().method() === 'POST' ? route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'File storage is temporarily unavailable.' }) }) : route.continue());
+  await input.setInputFiles({ name: 'replacement.txt', mimeType: 'text/plain', buffer: Buffer.from('Replacement') });
+  await expect(page.getByRole('alert')).toContainText('File storage is temporarily unavailable.');
+  await expect(page.getByRole('button', { name: 'Download attachment: original.txt', exact: true })).toBeVisible();
 });

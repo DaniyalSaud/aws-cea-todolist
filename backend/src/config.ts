@@ -18,7 +18,18 @@ const schema = z.object({
   DB_SSL_CA_PATH: z.string().min(1).optional(),
   DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
-  RUN_MIGRATIONS: boolean.default(true)
+  RUN_MIGRATIONS: boolean.default(true),
+  ATTACHMENT_STORAGE: z.enum(['local', 's3']).optional(),
+  LOCAL_UPLOAD_DIR: z.string().min(1).default('./uploads'),
+  AWS_REGION: z.string().min(1).optional(),
+  S3_BUCKET_NAME: z.string().min(3).optional()
+}).superRefine((value, context) => {
+  const storage = value.ATTACHMENT_STORAGE ?? (value.NODE_ENV === 'production' ? 's3' : 'local');
+  if (storage === 's3') {
+    for (const key of ['AWS_REGION', 'S3_BUCKET_NAME'] as const) {
+      if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: 'Required when attachment storage is S3.' });
+    }
+  }
 });
 
 export function readConfig(environment: NodeJS.ProcessEnv = process.env) {
@@ -30,7 +41,8 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env) {
   }
   return {
     ...result.data,
-    DB_SSL: result.data.DB_SSL ?? result.data.NODE_ENV === 'production'
+    DB_SSL: result.data.DB_SSL ?? result.data.NODE_ENV === 'production',
+    ATTACHMENT_STORAGE: result.data.ATTACHMENT_STORAGE ?? (result.data.NODE_ENV === 'production' ? 's3' : 'local')
   };
 }
 

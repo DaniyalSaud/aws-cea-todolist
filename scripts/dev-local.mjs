@@ -59,7 +59,7 @@ try {
   child = spawn(process.execPath, [npmCli, 'run', 'dev'], {
     cwd: root,
     stdio: 'inherit',
-    env: { ...process.env, DATABASE_URL: 'postgresql://todo:localtodo@127.0.0.1:5432/todo_app', DB_SSL: 'false', NODE_ENV: 'development' }
+    env: { ...process.env, DATABASE_URL: 'postgresql://todo:localtodo@127.0.0.1:5432/todo_app', DB_SSL: 'false', NODE_ENV: 'development', ATTACHMENT_STORAGE: 'local' }
   });
   child.on('exit', (code) => { void stop(code ?? 0); });
   child.on('error', (error) => { console.error(error.message); void stop(1); });

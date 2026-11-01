@@ -2,9 +2,9 @@
 
 A simple, responsive to-do list built with **React + TypeScript** in `frontend/`, **Express + TypeScript** in `backend/`, and **PostgreSQL**. Tasks are saved in the database and survive page refreshes and application restarts.
 
-Add, edit, complete, reopen, and delete tasks; filter active/completed tasks; clear completed tasks; and see your progress. The interface supports keyboard navigation and mobile screens, and preserves your draft if a save fails.
+Add, edit, complete, reopen, and delete tasks; filter active/completed tasks; clear completed tasks; and see your progress. **Attach one file per task, up to 5 MB**, then download, replace, or remove it. AWS deployments store attachments in a private S3 bucket; local development stores them on disk. The interface supports keyboard navigation and mobile screens, and preserves your draft or existing attachment if a save fails.
 
-This is one shared list with no sign-in. Everyone who can reach the API can view and change the list. For a personal AWS deployment, restrict access through your network or load balancer; add authentication and user-scoped tasks if you need separate private lists.
+This is one shared list with no sign-in. Everyone who can reach the API can view and change the list and its attachments. For a personal AWS deployment, restrict access through your network or load balancer; add authentication and user-scoped tasks if you need separate private lists.
 
 ## Run locally — no Docker needed
 
@@ -15,7 +15,7 @@ npm install
 npm run dev:local
 ```
 
-Open **http://localhost:5173**. This command creates the two `.env` files if missing, starts a real local PostgreSQL 17 database, applies migrations, and starts Express on port `3001` and Vite on port `5173`. Press Ctrl+C to stop everything. Data stays in `.local/postgres/`.
+Open **http://localhost:5173**. This command creates the two `.env` files if missing, starts a real local PostgreSQL 17 database, applies migrations, and starts Express on port `3001` and Vite on port `5173`. Press Ctrl+C to stop everything. Task data stays in `.local/postgres/`; attachments stay in `backend/uploads/`. No AWS credentials are needed.
 
 The embedded PostgreSQL package downloads a binary for your operating system during installation, so allow npm installation scripts. Run it as a normal OS user; PostgreSQL cannot run as root. The shortcut deliberately uses the local database credentials and disables database TLS. It never connects to your configured RDS database.
 
@@ -38,7 +38,7 @@ With Docker and Docker Compose installed:
 docker compose up --build -d
 ```
 
-Open **http://localhost:8080**. Compose starts PostgreSQL, Express, and the built React app served by Nginx. Nginx forwards `/api/*` to Express. Startup waits for the database and API health checks. Tasks persist in the `todos-db` volume.
+Open **http://localhost:8080**. Compose starts PostgreSQL, Express, and the built React app served by Nginx. Nginx forwards `/api/*` to Express. Startup waits for the database and API health checks. Tasks persist in the `todos-db` volume; local attachments persist in `todo-files`.
 
 ```sh
 docker compose down
@@ -61,6 +61,10 @@ Only the backend connects to PostgreSQL. Never put a database password or URL in
 | `DB_POOL_MAX` | Maximum PostgreSQL connections per backend replica; defaults to `10`. Size this with RDS capacity and replica count in mind. |
 | `TRUST_PROXY_HOPS` | Defaults to `0`. Use `1` behind one trusted ALB or Nginx proxy, and restrict direct API access. |
 | `RUN_MIGRATIONS` | Defaults to `true`. Set false when a separate deployment step applies migrations. |
+| `ATTACHMENT_STORAGE` | `local` or `s3`. Defaults to local in development/test, S3 in production. Set explicitly in your deployment. |
+| `LOCAL_UPLOAD_DIR` | Local attachment directory, defaults to `./uploads` relative to the backend working directory. |
+| `AWS_REGION` | Required in S3 mode; use the attachment bucket's region, e.g. `us-east-1`. |
+| `S3_BUCKET_NAME` | Required in S3 mode; the private bucket for attachments. |
 
 Do not add `sslmode`, `ssl`, `sslcert`, `sslkey`, or `sslrootcert` query parameters to `DATABASE_URL`; the backend rejects them so they cannot override verified TLS settings. Keep the AWS CA bundle current by rebuilding the image or rerunning `npm run rds:ca` for a deployment outside Docker.
 
@@ -75,11 +79,12 @@ The frontend Docker image also accepts runtime `API_UPSTREAM` (`backend:3001` by
 
 The app is prepared for RDS **PostgreSQL 17**. MySQL requires a different driver and schema; choose PostgreSQL when creating the RDS instance. AWS infrastructure is not provisioned by this repository.
 
-A straightforward deployment uses an HTTPS Application Load Balancer, two ECS/Fargate services (frontend and backend), and a private RDS instance:
+A straightforward deployment uses an HTTPS Application Load Balancer, two ECS/Fargate services (frontend and backend), a private RDS instance, and a private S3 attachment bucket:
 
 ```text
 Browser → HTTPS ALB ── /api and /api/* → Express :3001 → private RDS PostgreSQL :5432
                    └─ other paths    → React/Nginx :8080
+                                         Express → private S3 attachments
 ```
 
 1. Create an RDS PostgreSQL instance in the same VPC as the backend. Set the initial database name to `todo_app`, enable encryption and automated backups, and keep public access disabled. Allow inbound database port `5432` only from the backend service's security group. Enable/enforce SSL on the RDS instance.
@@ -103,13 +108,16 @@ Browser → HTTPS ALB ── /api and /api/* → Express :3001 → private RDS P
    TRUST_PROXY_HOPS=1
    DB_POOL_MAX=10
    RUN_MIGRATIONS=true
+   ATTACHMENT_STORAGE=s3
+   AWS_REGION=us-east-1
+   S3_BUCKET_NAME=YOUR_ATTACHMENT_BUCKET
    ```
 
    `DATABASE_URL` should come from the task definition's **secrets** configuration. Allow backend port `3001` only from the ALB's security group. Send backend logs to CloudWatch. Migrations use a PostgreSQL advisory lock, so concurrent startup by multiple replicas is safe. The migration user needs schema/table creation rights. With a restricted runtime database user, apply migrations first using a separate migration role, grant the runtime user SELECT/INSERT/UPDATE/DELETE on `todos`, and set `RUN_MIGRATIONS=false`.
 
 5. Run the frontend image on port `8080`. Add ALB listener rules for `/api` and `/api/*` to the backend target group; the default rule goes to the frontend target group. Set backend target health checks to **`/api/health`**, frontend health checks to **`/healthz`**. Build the frontend with an empty `VITE_API_URL` for this setup; no API hostname is compiled into the app.
 6. Attach an ACM TLS certificate to the ALB, redirect HTTP to HTTPS, and point your domain at the load balancer. Set `CORS_ORIGINS` to the actual frontend origin. If your backend runs in private subnets, provide NAT or VPC endpoints for ECR, logs, and secrets access as needed.
-7. Verify `https://todo.example.com/api/health` reports `{"status":"ok","database":"connected"}`, then create a task, reload, complete it, and delete it through the interface.
+7. Configure the private S3 bucket and backend task role as described below. Verify `https://todo.example.com/api/health` reports `{"status":"ok","database":"connected"}`, then create a task, attach a file, reload, download it, complete the task, and delete it through the interface.
 
 Alternatively, serve `frontend/dist` from a private S3 bucket through CloudFront and deploy the backend separately. Build with `VITE_API_URL=https://api.example.com`, configure backend CORS for your CloudFront/custom domain, and provide an HTTPS API endpoint. Use `index.html` for SPA navigation fallbacks.
 
@@ -126,6 +134,29 @@ npm run start -w backend
 
 Serve `frontend/dist` using a web server/CloudFront, run the backend under a service manager, and configure HTTPS/proxy routing. `vite preview` is for local build previews, not production hosting.
 
+## S3 task attachments
+
+Click a task's **paperclip** to attach a document, image, or other file. Clicking the filename downloads it; the adjacent × removes it. Clicking the paperclip again replaces the attachment. Titles and file metadata stay in RDS; file bytes stay in S3. Files are limited to 5 MB and are always downloaded as attachments rather than displayed as executable HTML.
+
+Use a **separate private bucket** for attachments if you also host the frontend in S3. An attachment bucket and a website bucket have different access requirements.
+
+1. Create a general-purpose S3 bucket in your backend's AWS region. Keep **Block all public access** enabled, use **Bucket owner enforced** object ownership, and enable default encryption (SSE-S3 works with the supplied IAM policy). Do not turn on static website hosting for the attachment bucket.
+2. Replace `YOUR_ATTACHMENT_BUCKET` in `infra/s3-task-policy.json` with the actual bucket name. Attach that policy to the **ECS task role**, or the EC2 instance role when running on EC2. This is the application role, distinct from the ECS task execution role used to pull images and read deployment secrets. The policy allows only Get/Put/Delete on `todo-attachments/*`. If you choose SSE-KMS, also grant the role the necessary permissions on the KMS key and configure its key policy.
+3. Set these backend environment variables and restart the service:
+
+   ```dotenv
+   ATTACHMENT_STORAGE=s3
+   AWS_REGION=us-east-1
+   S3_BUCKET_NAME=YOUR_ATTACHMENT_BUCKET
+   ```
+
+4. Ensure the backend can reach S3 over HTTPS. In private subnets, use an S3 gateway VPC endpoint or NAT; the endpoint policy must allow this bucket. Keep AWS access keys out of the frontend and container image. The SDK uses the IAM role automatically. For development against a real bucket, use `npm run dev` with S3 settings and an AWS profile/standard SDK credentials; `npm run dev:local` deliberately selects local storage.
+5. Upload a file from a task, reload, and download it. Download links expire after **60 seconds**. A fresh link is generated each time you click download. Uploads travel through Express; downloads use short-lived signed S3 URLs, so **bucket CORS configuration is unnecessary** for this flow.
+
+Replacing/removing an attachment, deleting a task, and clearing completed tasks enqueue old files for deletion in PostgreSQL. Cleanup runs immediately and retries every minute if S3 is temporarily unavailable. Keep the backend running to drain cleanup records. If you enable bucket versioning, configure a lifecycle rule for noncurrent versions; normal object deletion creates a delete marker rather than deleting all historical versions. Back up the database and attachment bucket together.
+
+If running multiple backend replicas, use S3 rather than local storage so every replica can access the same files. The local disk provider is for development and the Docker demonstration.
+
 ## API
 
 All task responses use camelCase timestamps (`createdAt`, `updatedAt`). Titles are trimmed and must contain 1–200 characters. Updates accept a title, a boolean completed state, or both. SQL queries use parameters.
@@ -137,6 +168,10 @@ All task responses use camelCase timestamps (`createdAt`, `updatedAt`). Titles a
 | PATCH | `/api/todos/:id` | `{ "completed": true }` or `{ "title": "New title" }` → `{ "todo": {...} }` |
 | DELETE | `/api/todos/:id` | 204, no response body |
 | DELETE | `/api/todos/completed` | `{ "deletedCount": 2 }` |
+| POST | `/api/todos/:id/attachment` | Multipart form with one `file` field, 1 byte–5 MB → `{ "todo": {...} }` |
+| GET | `/api/todos/:id/attachment/download-url` | `{ "url": "..." }`; private S3 URL expires in 60 seconds |
+| GET | `/api/todos/:id/attachment` | Download local file or redirect to a signed S3 URL |
+| DELETE | `/api/todos/:id/attachment` | Removes attachment metadata and queues file cleanup → `{ "todo": {...} }` |
 | GET | `/api/health` | Database readiness: 200 or 503 |
 | GET | `/healthz` | Process liveness |
 
@@ -152,6 +187,6 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-The backend integration suite starts an isolated **real PostgreSQL 17** instance, exercises API CRUD, persistence, validation, CORS, database outages, and migration concurrency, then stops and removes its temporary database. Browser tests start another isolated PostgreSQL instance and real Express/Vite servers, verify the complete task flow, error recovery, mobile layout, and plain-text rendering. Tests never use the development or RDS database. Browser screenshots are written to `test-results/`.
+The backend integration suite starts an isolated **real PostgreSQL 17** instance, exercises API CRUD, persistence, validation, CORS, database outages, migration concurrency, and real disk attachment upload/download/cleanup. The S3 adapter is checked against a local HTTP test server, including AWS-signed requests and expiring download URLs. Browser tests start another isolated PostgreSQL instance and real Express/Vite servers, and verify the complete task and attachment flows, error recovery, mobile layout, and plain-text rendering. Tests never use the development database, RDS, or a real S3 bucket. Browser screenshots are written to `test-results/`.
 
-Docker builds and live AWS connectivity require those environments; local tests do not provision AWS or verify your VPC, credentials, or RDS certificate configuration.
+Docker builds and live AWS connectivity require those environments; local tests do not provision AWS or verify your VPC, IAM policy, bucket permissions, credentials, or RDS certificate configuration.

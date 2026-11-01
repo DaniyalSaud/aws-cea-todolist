@@ -28,6 +28,10 @@ services:
       CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
       TRUST_PROXY_HOPS: 1
       RUN_MIGRATIONS: "true"
+      ATTACHMENT_STORAGE: local
+      LOCAL_UPLOAD_DIR: /app/backend/uploads
+    volumes:
+      - todo-files:/app/backend/uploads
     ports:
       - "127.0.0.1:3001:3001"
     depends_on:
@@ -48,3 +52,4 @@ services:
 
 volumes:
   todos-db:
+  todo-files:

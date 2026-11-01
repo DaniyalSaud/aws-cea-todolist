@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 
@@ -16,6 +16,7 @@ const postgres = new EmbeddedPostgres({
   authMethod: 'scram-sha-256', initdbFlags: ['--encoding=UTF8', '--locale=C'],
   postgresFlags: ['-h', '127.0.0.1'], onLog: () => {}, onError: () => {}
 });
+const uploadDirectory = await mkdtemp(join(tmpdir(), 'everyday-e2e-files-'));
 let child;
 let stopping = false;
 async function stop(code = 0) {
@@ -23,6 +24,11 @@ async function stop(code = 0) {
   stopping = true;
   child?.kill('SIGTERM');
   await postgres.stop().catch(() => {});
+  const cleanupPath = resolve(uploadDirectory);
+  if (dirname(cleanupPath) !== resolve(tmpdir()) || !basename(cleanupPath).startsWith('everyday-e2e-files-')) {
+    throw new Error('Unexpected temporary upload directory; refusing cleanup.');
+  }
+  await rm(cleanupPath, { recursive: true, force: true });
   process.exitCode = code;
 }
 process.on('SIGINT', () => { void stop(); });
@@ -34,7 +40,7 @@ try {
   await postgres.createDatabase('todo_e2e');
   child = spawn(process.execPath, ['dist/server.js'], {
     cwd: fileURLToPath(new URL('../backend/', import.meta.url)), stdio: 'inherit',
-    env: { ...process.env, NODE_ENV: 'test', PORT: '3002', DATABASE_URL: `postgresql://e2e_user:e2e-only-password@127.0.0.1:${port}/todo_e2e`, DB_SSL: 'false', CORS_ORIGINS: 'http://127.0.0.1:5174', TRUST_PROXY_HOPS: '0', RUN_MIGRATIONS: 'true' }
+    env: { ...process.env, NODE_ENV: 'test', PORT: '3002', DATABASE_URL: `postgresql://e2e_user:e2e-only-password@127.0.0.1:${port}/todo_e2e`, DB_SSL: 'false', CORS_ORIGINS: 'http://127.0.0.1:5174', TRUST_PROXY_HOPS: '0', RUN_MIGRATIONS: 'true', ATTACHMENT_STORAGE: 'local', LOCAL_UPLOAD_DIR: uploadDirectory }
   });
   child.on('exit', (code) => { void stop(code ?? 0); });
   child.on('error', (error) => { console.error(error.message); void stop(1); });

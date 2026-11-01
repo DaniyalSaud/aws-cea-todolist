@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
-import { ArrowRight, CalendarDays, Check, CheckCheck, CircleCheck, CloudCheck, Leaf, LoaderCircle, Pencil, Plus, RotateCcw, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowRight, CalendarDays, Check, CheckCheck, CircleCheck, CloudCheck, Download, Leaf, LoaderCircle, Paperclip, Pencil, Plus, RotateCcw, Sparkles, Trash2, X } from 'lucide-react';
 import { api, type Todo } from './api';
 
 type Filter = 'all' | 'active' | 'completed';
@@ -11,11 +11,15 @@ interface TodoItemProps {
   onToggle: (todo: Todo) => void;
   onDelete: (todo: Todo) => void;
   onEdit: (todo: Todo, title: string) => Promise<boolean>;
+  onAttach: (todo: Todo, file: File) => void;
+  onRemoveAttachment: (todo: Todo) => void;
+  onDownload: (todo: Todo) => void;
 }
 
-function TodoItem({ todo, busy, working, onToggle, onDelete, onEdit }: TodoItemProps) {
+function TodoItem({ todo, busy, working, onToggle, onDelete, onEdit, onAttach, onRemoveAttachment, onDownload }: TodoItemProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(todo.title);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -56,8 +60,19 @@ function TodoItem({ todo, busy, working, onToggle, onDelete, onEdit }: TodoItemP
         </form>
       ) : (
         <>
-          <span className="task-title">{todo.title}</span>
+          <div className="task-content"><span className="task-title">{todo.title}</span>
+            {todo.attachment && <div className="attachment-row">
+              <button type="button" className="attachment-download" title={`Download ${todo.attachment.name}`} aria-label={`Download attachment: ${todo.attachment.name}`} disabled={busy} onClick={() => onDownload(todo)}><Paperclip size={12} /><span>{todo.attachment.name}</span><span className="attachment-size">{todo.attachment.size >= 1024 * 1024 ? `${(todo.attachment.size / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(todo.attachment.size / 1024))} KB`}</span><Download size={12} /></button>
+              <button type="button" className="attachment-remove" title="Remove attachment" aria-label={`Remove attachment: ${todo.attachment.name}`} disabled={busy} onClick={() => onRemoveAttachment(todo)}><X size={12} /></button>
+            </div>}
+          </div>
+          <input ref={fileInput} type="file" className="sr-only" tabIndex={-1} aria-label={`Attachment file: ${todo.title}`} disabled={busy} onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) onAttach(todo, file);
+            event.target.value = '';
+          }} />
           <div className="task-actions">
+            <button type="button" className="icon-button" aria-label={`${todo.attachment ? 'Replace' : 'Attach'} file: ${todo.title}`} title={`${todo.attachment ? 'Replace' : 'Attach'} file (up to 5 MB)`} disabled={busy} onClick={() => fileInput.current?.click()}><Paperclip size={16} /></button>
             <button type="button" className="icon-button" aria-label={`Edit: ${todo.title}`} title="Edit task" disabled={busy} onClick={() => { setDraft(todo.title); setEditing(true); }}><Pencil size={16} /></button>
             <button type="button" className="icon-button delete-button" aria-label={`Delete: ${todo.title}`} title="Delete task" disabled={busy} onClick={() => onDelete(todo)}><Trash2 size={16} /></button>
           </div>
@@ -154,6 +169,36 @@ export default function App() {
     }, 'Completed tasks cleared.');
   }
 
+  function attachFile(todo: Todo, file: File) {
+    if (!file.size || file.size > 5 * 1024 * 1024) {
+      setError(!file.size ? 'Choose a non-empty file to attach.' : 'Choose a file smaller than 5 MB.');
+      return;
+    }
+    void perform(todo.id, async () => {
+      const { todo: updated } = await api.attach(todo.id, file);
+      setTodos((current) => current.map((item) => item.id === updated.id ? updated : item));
+    }, 'File attached.');
+  }
+
+  function removeAttachment(todo: Todo) {
+    void perform(todo.id, async () => {
+      const { todo: updated } = await api.removeAttachment(todo.id);
+      setTodos((current) => current.map((item) => item.id === updated.id ? updated : item));
+    }, 'Attachment removed.');
+  }
+
+  function downloadAttachment(todo: Todo) {
+    void perform(`download:${todo.id}`, async () => {
+      const url = await api.downloadAttachment(todo.id);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = todo.attachment?.name ?? 'attachment';
+      document.body.append(link);
+      link.click();
+      link.remove();
+    }, 'Your download is ready.');
+  }
+
   const completed = todos.filter((todo) => todo.completed).length;
   const remaining = todos.length - completed;
   const progress = todos.length ? Math.round(completed / todos.length * 100) : 0;
@@ -208,7 +253,7 @@ export default function App() {
               ) : loadFailed ? (
                 <div className="empty-state"><span className="empty-illustration"><CloudCheck size={36} strokeWidth={1.5} /></span><h3>Let’s reconnect to your list.</h3><p>Your tasks will appear when we’re connected.</p></div>
               ) : visible.length ? (
-                <ul className="task-list" aria-label="Tasks">{visible.map((todo) => <TodoItem key={todo.id} todo={todo} busy={busy !== null} working={busy === todo.id} onToggle={(item) => { void updateTask(item, { completed: !item.completed }); }} onDelete={removeTask} onEdit={(item, nextTitle) => updateTask(item, { title: nextTitle })} />)}</ul>
+                <ul className="task-list" aria-label="Tasks">{visible.map((todo) => <TodoItem key={todo.id} todo={todo} busy={busy !== null} working={busy === todo.id} onToggle={(item) => { void updateTask(item, { completed: !item.completed }); }} onDelete={removeTask} onEdit={(item, nextTitle) => updateTask(item, { title: nextTitle })} onAttach={attachFile} onRemoveAttachment={removeAttachment} onDownload={downloadAttachment} />)}</ul>
               ) : (
                 <div className="empty-state">
                   <span className="empty-illustration"><span className="illustration-spark"><Sparkles size={15} /></span>{filter === 'active' && todos.length ? <CheckCheck size={38} strokeWidth={1.5} /> : <Leaf size={38} strokeWidth={1.5} />}</span>
@@ -237,7 +282,7 @@ export default function App() {
           </aside>
         </div>
 
-        <div className="save-status" role="status"><CloudCheck size={15} /><span>{loading ? 'Connecting to your list…' : loadFailed ? 'Waiting to reconnect' : busy ? 'Saving your change…' : error ? 'Your change couldn’t be saved' : 'All changes saved'}</span></div>
+        <div className="save-status" role="status"><CloudCheck size={15} /><span>{loading ? 'Connecting to your list…' : loadFailed ? 'Waiting to reconnect' : busy?.startsWith('download:') ? 'Preparing your download…' : busy ? 'Saving your change…' : error ? 'Please check the message above' : 'All changes saved'}</span></div>
         <span className="sr-only" aria-live="polite">{notice}</span>
       </main>
 

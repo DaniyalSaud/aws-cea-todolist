@@ -4,14 +4,17 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import pg from 'pg';
+import multer from 'multer';
 import { z } from 'zod';
 import type { Config } from './config.js';
+import { AttachmentService, MAX_ATTACHMENT_BYTES, todoColumns } from './attachments.js';
 
 const title = z.string().trim().min(1, 'Enter a task.').max(200, 'Keep your task to 200 characters or fewer.');
 const createSchema = z.object({ title }).strict();
 const updateSchema = z.object({ title: title.optional(), completed: z.boolean().optional() }).strict()
   .refine((value) => value.title !== undefined || value.completed !== undefined, 'Provide a title or completed status.');
-const columns = 'id, title, completed, created_at AS "createdAt", updated_at AS "updatedAt"';
+const columns = todoColumns;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1, fields: 0, parts: 1 } }).single('file');
 
 function parse<T>(schema: z.ZodType<T>, value: unknown, response: Response): T | undefined {
   const result = schema.safeParse(value);
@@ -26,7 +29,7 @@ function todoId(request: Request, response: Response) {
   return parse(z.uuid(), request.params.id, response);
 }
 
-export function createApp(pool: pg.Pool, config: Pick<Config, 'CORS_ORIGINS' | 'TRUST_PROXY_HOPS'>) {
+export function createApp(pool: pg.Pool, config: Pick<Config, 'CORS_ORIGINS' | 'TRUST_PROXY_HOPS'>, attachments: AttachmentService) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', config.TRUST_PROXY_HOPS);
@@ -79,8 +82,7 @@ export function createApp(pool: pg.Pool, config: Pick<Config, 'CORS_ORIGINS' | '
   });
 
   app.delete('/api/todos/completed', async (_request, response) => {
-    const result = await pool.query('DELETE FROM todos WHERE completed = TRUE');
-    response.json({ deletedCount: result.rowCount });
+    response.json({ deletedCount: await attachments.deleteTasks(true) });
   });
 
   app.patch('/api/todos/:id', async (request, response) => {
@@ -100,9 +102,47 @@ export function createApp(pool: pg.Pool, config: Pick<Config, 'CORS_ORIGINS' | '
   app.delete('/api/todos/:id', async (request, response) => {
     const id = todoId(request, response);
     if (!id) return;
-    const result = await pool.query('DELETE FROM todos WHERE id = $1', [id]);
-    if (!result.rowCount) { response.status(404).json({ error: 'This task no longer exists.' }); return; }
+    const count = await attachments.deleteTasks(false, id);
+    if (!count) { response.status(404).json({ error: 'This task no longer exists.' }); return; }
     response.status(204).end();
+  });
+
+  const uploadLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Please wait a moment before uploading another file.' } });
+  app.post('/api/todos/:id/attachment', uploadLimit, upload, async (request, response) => {
+    const id = todoId(request, response);
+    if (!id) return;
+    if (!request.file || !request.file.size) { response.status(400).json({ error: 'Choose a non-empty file to attach.' }); return; }
+    const todo = await attachments.upload(id, request.file);
+    if (!todo) { response.status(404).json({ error: 'This task no longer exists.' }); return; }
+    response.json({ todo });
+  });
+
+  app.delete('/api/todos/:id/attachment', async (request, response) => {
+    const id = todoId(request, response);
+    if (!id) return;
+    const todo = await attachments.remove(id);
+    if (!todo) { response.status(404).json({ error: 'This task no longer exists.' }); return; }
+    response.json({ todo });
+  });
+
+  app.get('/api/todos/:id/attachment/download-url', async (request, response) => {
+    const id = todoId(request, response);
+    if (!id) return;
+    const attachment = await attachments.get(id);
+    if (!attachment) { response.status(404).json({ error: 'No file is attached to this task.' }); return; }
+    response.json({ url: attachment.destination.kind === 'url' ? attachment.destination.url : `/api/todos/${id}/attachment` });
+  });
+
+  app.get('/api/todos/:id/attachment', async (request, response) => {
+    const id = todoId(request, response);
+    if (!id) return;
+    const attachment = await attachments.get(id);
+    if (!attachment) { response.status(404).json({ error: 'No file is attached to this task.' }); return; }
+    if (attachment.destination.kind === 'url') response.redirect(attachment.destination.url);
+    else {
+      response.type('application/octet-stream');
+      response.download(attachment.destination.path, attachment.name);
+    }
   });
 
   app.use((_request, response) => response.status(404).json({ error: 'Route not found.' }));
@@ -110,7 +150,11 @@ export function createApp(pool: pg.Pool, config: Pick<Config, 'CORS_ORIGINS' | '
   const handleError: ErrorRequestHandler = (error: unknown, _request, response, _next) => {
     if (response.headersSent) { _next(error); return; }
     const failure = error as { status?: number; type?: string; code?: string };
-    if (failure.type === 'entity.parse.failed') {
+    if (error instanceof multer.MulterError) {
+      response.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+        error: error.code === 'LIMIT_FILE_SIZE' ? 'Choose a file smaller than 5 MB.' : 'Attach one file at a time using the file field.'
+      });
+    } else if (failure.type === 'entity.parse.failed') {
       response.status(400).json({ error: 'The request must contain valid JSON.' });
     } else if (failure.status === 413) {
       response.status(413).json({ error: 'The request is too large.' });

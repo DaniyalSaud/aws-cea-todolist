@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: todo_app
+      POSTGRES_USER: todo
+      POSTGRES_PASSWORD: localtodo
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - todos-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U todo -d todo_app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: postgresql://todo:localtodo@db:5432/todo_app
+      DB_SSL: "false"
+      CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      TRUST_PROXY_HOPS: 1
+      RUN_MIGRATIONS: "true"
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  todos-db:

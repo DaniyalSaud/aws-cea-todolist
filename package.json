@@ -1,0 +1,24 @@
+{
+  "name": "everyday-todo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["frontend", "backend"],
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "concurrently -k -n api,web -c green,cyan \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "dev:local": "node scripts/dev-local.mjs",
+    "build": "npm run build --workspaces",
+    "check": "npm run check --workspaces",
+    "test": "npm run test -w backend",
+    "test:e2e": "npm run build -w backend && playwright test",
+    "db:migrate": "npm run db:migrate -w backend",
+    "rds:ca": "node scripts/download-rds-ca.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "concurrently": "^9.2.1",
+    "embedded-postgres": "17.11.0-beta.19"
+  },
+  "overrides": { "minimatch": "^11.0.1" }
+}

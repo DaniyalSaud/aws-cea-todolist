@@ -1,0 +1,28 @@
+services:
+  backend:
+    image: ${BACKEND_IMAGE}
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: ${DATABASE_URL}
+      DB_SSL: "true"
+      DB_SSL_CA_PATH: /app/certs/global-bundle.pem
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      TRUST_PROXY_HOPS: "0"
+      DB_POOL_MAX: "5"
+      RUN_MIGRATIONS: "true"
+    expose:
+      - "3001"
+    restart: unless-stopped
+
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    environment:
+      API_UPSTREAM: backend:3001
+      DNS_RESOLVER: 127.0.0.11
+    ports:
+      - "80:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

@@ -1,14 +1,30 @@
 #!/bin/bash
-# EC2 launch-template user data for the Web Tier on Ubuntu 24.04 LTS.
+# EC2 launch-template user data for the container host on Ubuntu 24.04 LTS.
 set -Eeuo pipefail
 exec > >(tee -a /var/log/everyday-bootstrap.log) 2>&1
 trap 'bootstrap_exit_code=$?; echo "Bootstrap failed at line ${LINENO} (exit ${bootstrap_exit_code})" >&2; exit "$bootstrap_exit_code"' ERR
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
-apt-get -o Acquire::Retries=3 install -y docker.io docker-compose-v2 git curl ca-certificates
+apt-get -o Acquire::Retries=3 install -y docker.io docker-compose-v2 git curl ca-certificates unzip
 systemctl enable --now docker
 usermod -aG docker ubuntu
+
+if ! command -v aws >/dev/null 2>&1; then
+  awscli_arch="$(dpkg --print-architecture)"
+  case "$awscli_arch" in
+    amd64) awscli_arch=x86_64 ;;
+    arm64) awscli_arch=aarch64 ;;
+    *) echo "Unsupported architecture for AWS CLI: $awscli_arch" >&2; exit 1 ;;
+  esac
+  awscli_directory="$(mktemp -d)"
+  curl --fail --location --silent --show-error --retry 3 \
+    "https://awscli.amazonaws.com/awscli-exe-linux-${awscli_arch}.zip" \
+    --output "${awscli_directory}/awscliv2.zip"
+  unzip -q "${awscli_directory}/awscliv2.zip" -d "$awscli_directory"
+  "${awscli_directory}/aws/install"
+  rm -rf -- "$awscli_directory"
+fi
 
 install -d -o ubuntu -g ubuntu /home/ubuntu/everyday
 if [ ! -d /home/ubuntu/everyday/.git ]; then
@@ -17,21 +33,6 @@ if [ ! -d /home/ubuntu/everyday/.git ]; then
 fi
 cd /home/ubuntu/everyday
 
-# Build from the repository root so Docker can copy the workspace package files.
-docker build -f frontend/Dockerfile -t todo-web:initial .
-docker network inspect todo-network >/dev/null 2>&1 || docker network create todo-network
-if docker container inspect todo-web >/dev/null 2>&1; then
-  docker rm -f todo-web
-fi
-docker run -d \
-  --name todo-web \
-  --restart unless-stopped \
-  --network todo-network \
-  -p 80:8080 \
-  todo-web:initial
-
-curl --fail --silent --show-error --retry 15 --retry-connrefused \
-  --retry-delay 2 --max-time 5 http://127.0.0.1/healthz
-printf '\nWeb Tier bootstrap completed.\n'
+printf '\nContainer host bootstrap completed.\n'
+aws --version
 docker compose version
-docker ps --filter name=todo-web

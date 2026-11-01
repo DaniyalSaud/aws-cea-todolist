@@ -11,6 +11,10 @@ services:
       TRUST_PROXY_HOPS: "0"
       DB_POOL_MAX: "5"
       RUN_MIGRATIONS: "true"
+      ATTACHMENT_STORAGE: ${ATTACHMENT_STORAGE:-s3}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
+      LOCAL_UPLOAD_DIR: /app/uploads
     expose:
       - "3001"
     restart: unless-stopped

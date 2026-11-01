@@ -89,11 +89,11 @@ Browser → HTTPS ALB ── /api and /api/* → Express :3001 → private RDS P
 
 1. Create an RDS PostgreSQL instance in the same VPC as the backend. Set the initial database name to `todo_app`, enable encryption and automated backups, and keep public access disabled. Allow inbound database port `5432` only from the backend service's security group. Enable/enforce SSL on the RDS instance.
 2. Store the connection URL in AWS Secrets Manager or SSM Parameter Store. Supply it to the backend as `DATABASE_URL`; grant the ECS task execution role access to the specific secret. Use the RDS DNS endpoint as the host, so hostname verification works.
-3. Build both images from the **repository root**, then push them to your ECR repositories:
+3. On every push to `main`, [publish-ghcr.yml](./.github/workflows/publish-ghcr.yml) builds both images and publishes them to GitHub Container Registry (GHCR). The workflow uses the built-in `GITHUB_TOKEN`; no long-lived registry credential is committed.
 
    ```sh
-   docker build -f backend/Dockerfile -t everyday-backend .
-   docker build -f frontend/Dockerfile -t everyday-frontend .
+   ghcr.io/YOUR_GITHUB_USERNAME/everyday-backend:latest
+   ghcr.io/YOUR_GITHUB_USERNAME/everyday-frontend:latest
    ```
 
 4. Run the backend image with:
@@ -116,7 +116,7 @@ Browser → HTTPS ALB ── /api and /api/* → Express :3001 → private RDS P
    `DATABASE_URL` should come from the task definition's **secrets** configuration. Allow backend port `3001` only from the ALB's security group. Send backend logs to CloudWatch. Migrations use a PostgreSQL advisory lock, so concurrent startup by multiple replicas is safe. The migration user needs schema/table creation rights. With a restricted runtime database user, apply migrations first using a separate migration role, grant the runtime user SELECT/INSERT/UPDATE/DELETE on `todos`, and set `RUN_MIGRATIONS=false`.
 
 5. Run the frontend image on port `8080`. Add ALB listener rules for `/api` and `/api/*` to the backend target group; the default rule goes to the frontend target group. Set backend target health checks to **`/api/health`**, frontend health checks to **`/healthz`**. Build the frontend with an empty `VITE_API_URL` for this setup; no API hostname is compiled into the app.
-6. Attach an ACM TLS certificate to the ALB, redirect HTTP to HTTPS, and point your domain at the load balancer. Set `CORS_ORIGINS` to the actual frontend origin. If your backend runs in private subnets, provide NAT or VPC endpoints for ECR, logs, and secrets access as needed.
+6. Attach an ACM TLS certificate to the ALB, redirect HTTP to HTTPS, and point your domain at the load balancer. Set `CORS_ORIGINS` to the actual frontend origin. If your backend runs in private subnets, provide NAT or VPC endpoints for GHCR, logs, and secrets access as needed.
 7. Configure the private S3 bucket and backend task role as described below. Verify `https://todo.example.com/api/health` reports `{"status":"ok","database":"connected"}`, then create a task, attach a file, reload, download it, complete the task, and delete it through the interface.
 
 Alternatively, serve `frontend/dist` from a private S3 bucket through CloudFront and deploy the backend separately. Build with `VITE_API_URL=https://api.example.com`, configure backend CORS for your CloudFront/custom domain, and provide an HTTPS API endpoint. Use `index.html` for SPA navigation fallbacks.

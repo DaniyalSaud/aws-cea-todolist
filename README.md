@@ -96,6 +96,18 @@ Browser → HTTPS ALB ── /api and /api/* → Express :3001 → private RDS P
    ghcr.io/YOUR_GITHUB_USERNAME/everyday-frontend:latest
    ```
 
+   The same workflow verifies the application first, then deploys the immutable `sha-<commit>` tags to EC2 over SSH. Configure these GitHub Actions secrets in **Settings → Secrets and variables → Actions**:
+
+   | Secret | Value |
+   | --- | --- |
+   | `EC2_HOST` | EC2 public DNS name or Elastic IP |
+   | `EC2_USERNAME` | `ec2-user` for Amazon Linux or `ubuntu` for Ubuntu |
+   | `EC2_SSH_PRIVATE_KEY` | Full private SSH key matching the instance key pair |
+   | `EC2_DEPLOY_PATH` | `/home/ec2-user/everyday` or `/home/ubuntu/everyday` |
+   | `GHCR_READ_TOKEN` | Fine-grained GitHub token with package read access, if GHCR images are private |
+
+   The EC2 directory must already contain `compose.aws.yaml` and `.env.aws`. Keep the RDS URL and S3 settings only in `.env.aws`; the workflow updates only the two image lines. The EC2 security group should allow SSH only from an approved administrative source, or use a self-hosted runner/SSM instead of public SSH for a stricter setup.
+
 4. Run the backend image with:
 
    ```dotenv

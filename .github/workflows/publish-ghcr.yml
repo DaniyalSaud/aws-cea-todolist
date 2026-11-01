@@ -9,7 +9,28 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Check types and lint
+        run: npm run check
+      - name: Build application
+        run: npm run build
+      - name: Test backend
+        run: npm test
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,3 +84,34 @@ jobs:
           push: true
           tags: ${{ steps.frontend-meta.outputs.tags }}
           labels: ${{ steps.frontend-meta.outputs.labels }}
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          IMAGE_TAG: sha-${{ github.sha }}
+          GHCR_USERNAME: ${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          DEPLOY_PATH: ${{ secrets.EC2_DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          envs: IMAGE_TAG,GHCR_USERNAME,GHCR_TOKEN,DEPLOY_PATH
+          script_stop: true
+          script: |
+            set -eu
+            cd "${DEPLOY_PATH:-/home/ec2-user/everyday}"
+            if [ -n "${GHCR_TOKEN:-}" ]; then
+              printf '%s' "$GHCR_TOKEN" | sudo docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+            fi
+            sudo sed -i "s#^BACKEND_IMAGE=.*#BACKEND_IMAGE=ghcr.io/${GHCR_USERNAME,,}/everyday-backend:${IMAGE_TAG}#" .env.aws
+            sudo sed -i "s#^FRONTEND_IMAGE=.*#FRONTEND_IMAGE=ghcr.io/${GHCR_USERNAME,,}/everyday-frontend:${IMAGE_TAG}#" .env.aws
+            sudo docker-compose --env-file .env.aws -f compose.aws.yaml pull
+            sudo docker-compose --env-file .env.aws -f compose.aws.yaml up -d --remove-orphans
+            sudo docker image prune -af --filter "until=168h"
+            sudo docker-compose --env-file .env.aws -f compose.aws.yaml ps

@@ -226,7 +226,7 @@ export default function App() {
         <section className="intro" aria-labelledby="page-title">
           <div className="eyebrow"><span className="small-dot" /> A LITTLE FOCUS GOES A LONG WAY</div>
           <h1 id="page-title">A little less on your mind<span>.</span></h1>
-          <p>Write it down. Take it one task at a time. Make space for your day.</p>
+          <p>Write it down CUZ IT IS UPDATED. Take it one task at a time. Make space for your day.</p>
         </section>
 
         <div className="workspace">

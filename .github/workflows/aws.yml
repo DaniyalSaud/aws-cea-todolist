@@ -64,11 +64,52 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Inspect OIDC claims
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import base64
+          import json
+          import os
+          import urllib.request
+
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          url += "&audience=sts.amazonaws.com"
+
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": "Bearer " +
+                  os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+              }
+          )
+
+          with urllib.request.urlopen(request, timeout=30) as response:
+              token = json.load(response)["value"]
+
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+
+          print(json.dumps({
+              key: claims.get(key)
+              for key in [
+                  "iss",
+                  "aud",
+                  "sub",
+                  "repository",
+                  "ref",
+                  "environment"
+              ]
+          }, indent=2))
+          PY
+
       - name: Authenticate to AWS using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::935173128637:role/everyday-github-actions-role
           aws-region: us-east-1
+          retry-max-attempts: 2
 
       - name: Log in to ECR
         id: ecr

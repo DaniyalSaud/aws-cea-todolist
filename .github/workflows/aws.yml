@@ -1,0 +1,101 @@
+name: AWS pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: everyday-aws-main
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  IMAGE_TAG: sha-${{ github.sha }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm test
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    permissions:
+      contents: read
+      id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [backend, frontend]
+
+    env:
+      REPOSITORY: everyday-${{ matrix.tier }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to AWS using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Check whether this immutable image already exists
+        id: existing
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(aws ecr batch-get-image \
+            --repository-name "$REPOSITORY" \
+            --image-ids "imageTag=$IMAGE_TAG" \
+            --query 'length(images)' \
+            --output text)
+
+          if [ "$count" -gt 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.tier }}/Dockerfile
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.REPOSITORY }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=${{ matrix.tier }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.tier }}
+
+      - name: Report image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: echo "$REGISTRY/$REPOSITORY:$IMAGE_TAG"

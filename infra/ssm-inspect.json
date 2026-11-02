@@ -1,0 +1,5 @@
+{
+  "commands": [
+    "set -eu\nsudo docker ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'\nfor task_path in /home/ubuntu/everyday /home/ec2-user/everyday; do\n if [ -d \"$task_path\" ]; then\n  printf 'Deployment directory: %s\\n' \"$task_path\"\n  for task_file in compose.aws.yaml .env.aws; do\n   if [ -f \"$task_path/$task_file\" ]; then printf '%s exists\\n' \"$task_file\"; else printf '%s missing\\n' \"$task_file\"; fi\n  done\n fi\ndone\ncurl -sS --max-time 10 -o /dev/null -w 'Frontend local HTTP status: %{http_code}\\n' http://127.0.0.1/healthz"
+  ]
+}

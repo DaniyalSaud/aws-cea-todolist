@@ -20,18 +20,28 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
-      - run: npm ci
-      - run: npm run check
-      - run: npm run build
-      - run: npm test
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check types and lint
+        run: npm run check
+
+      - name: Build application
+        run: npm run build
+
+      - name: Test backend
+        run: npm test
 
   publish:
     needs: verify
@@ -51,13 +61,14 @@ jobs:
       REPOSITORY: everyday-${{ matrix.tier }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Authenticate to AWS using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::935173128637:role/everyday-github-actions-role
+          aws-region: us-east-1
 
       - name: Log in to ECR
         id: ecr
@@ -68,6 +79,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           count=$(aws ecr batch-get-image \
             --repository-name "$REPOSITORY" \
             --image-ids "imageTag=$IMAGE_TAG" \

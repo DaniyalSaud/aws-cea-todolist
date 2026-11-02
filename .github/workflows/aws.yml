@@ -14,32 +14,31 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_PAGER: ""
+  AWS_RETRY_MODE: standard
+  AWS_MAX_ATTEMPTS: "3"
   IMAGE_TAG: sha-${{ github.sha }}
 
 jobs:
   verify:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-
       - name: Install dependencies
         run: npm ci
-
       - name: Check types and lint
         run: npm run check
-
       - name: Build application
         run: npm run build
-
       - name: Test backend
         run: npm test
 
@@ -47,96 +46,45 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 25
-
     permissions:
       contents: read
       id-token: write
-
     strategy:
       fail-fast: false
       matrix:
         tier: [backend, frontend]
-
     env:
       REPOSITORY: everyday-${{ matrix.tier }}
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Inspect OIDC claims
-        shell: bash
-        run: |
-          python3 <<'PY'
-          import base64
-          import json
-          import os
-          import urllib.request
-
-          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
-          url += "&audience=sts.amazonaws.com"
-
-          request = urllib.request.Request(
-              url,
-              headers={
-                  "Authorization": "Bearer " +
-                  os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
-              }
-          )
-
-          with urllib.request.urlopen(request, timeout=30) as response:
-              token = json.load(response)["value"]
-
-          payload = token.split(".")[1]
-          payload += "=" * (-len(payload) % 4)
-          claims = json.loads(base64.urlsafe_b64decode(payload))
-
-          print(json.dumps({
-              key: claims.get(key)
-              for key in [
-                  "iss",
-                  "aud",
-                  "sub",
-                  "repository",
-                  "ref",
-                  "environment"
-              ]
-          }, indent=2))
-          PY
-
       - name: Authenticate to AWS using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::935173128637:role/everyday-github-actions-role
           aws-region: us-east-1
           retry-max-attempts: 2
-
       - name: Log in to ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
-
       - name: Check whether this immutable image already exists
         id: existing
         shell: bash
         run: |
           set -euo pipefail
-
           count=$(aws ecr batch-get-image \
             --repository-name "$REPOSITORY" \
             --image-ids "imageTag=$IMAGE_TAG" \
             --query 'length(images)' \
             --output text)
-
           if [ "$count" -gt 0 ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Set up Docker Buildx
         if: steps.existing.outputs.exists != 'true'
         uses: docker/setup-buildx-action@v3
-
       - name: Build and push image
         if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@v6
@@ -147,8 +95,243 @@ jobs:
           tags: ${{ steps.ecr.outputs.registry }}/${{ env.REPOSITORY }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=${{ matrix.tier }}
           cache-to: type=gha,mode=max,scope=${{ matrix.tier }}
-
       - name: Report image
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: echo "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ASG_NAME: AWS_CEA
+      DEPLOYMENT_BUCKET: aws-cea-lab-dr
+      RELEASE_PARAMETER: /everyday/image-tag
+      TARGET_GROUP_ARN: arn:aws:elasticloadbalancing:us-east-1:935173128637:targetgroup/everyday-frontend-tg/0801bdee3e44b427
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Authenticate to AWS using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::935173128637:role/everyday-github-actions-role
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+          retry-max-attempts: 2
+      - name: Deploy to application instances and verify health
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -u <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import tempfile
+          import time
+          from pathlib import Path
+
+          tag = os.environ["IMAGE_TAG"]
+          group_name = os.environ["ASG_NAME"]
+          bucket = os.environ["DEPLOYMENT_BUCKET"]
+          parameter = os.environ["RELEASE_PARAMETER"]
+          target_group = os.environ["TARGET_GROUP_ARN"]
+          terminal = {"Success", "Failed", "Cancelled", "TimedOut"}
+          inflight = {}
+
+          def aws(*args, missing=()):
+              result = subprocess.run(
+                  ["aws", *args, "--output", "json", "--no-cli-pager"],
+                  text=True, capture_output=True, timeout=90,
+              )
+              if result.returncode:
+                  if any(f"({code})" in result.stderr for code in missing):
+                      return None
+                  raise RuntimeError(result.stderr.strip() or "AWS CLI failed")
+              return json.loads(result.stdout) if result.stdout.strip() else {}
+
+          def application_group():
+              groups = aws(
+                  "autoscaling", "describe-auto-scaling-groups",
+                  "--auto-scaling-group-names", group_name,
+              )["AutoScalingGroups"]
+              if not groups or groups[0]["DesiredCapacity"] < 1:
+                  raise RuntimeError("Application group must have desired capacity >= 1")
+              return groups[0]
+
+          def members(group):
+              return {
+                  item["InstanceId"]: item["LifecycleState"]
+                  for item in group["Instances"]
+                  if item["LifecycleState"] == "InService"
+                  or item["LifecycleState"].startswith("Pending")
+              }
+
+          def healthy(instance):
+              targets = aws(
+                  "elbv2", "describe-target-health",
+                  "--target-group-arn", target_group,
+                  "--targets", f"Id={instance}",
+              )["TargetHealthDescriptions"]
+              return bool(targets) and all(
+                  item["TargetHealth"]["State"] == "healthy" for item in targets
+              )
+
+          def set_release(release):
+              aws(
+                  "ssm", "put-parameter", "--name", parameter,
+                  "--type", "String", "--value", release, "--overwrite",
+              )
+
+          def invocation(command, instance):
+              return aws(
+                  "ssm", "get-command-invocation",
+                  "--command-id", command, "--instance-id", instance,
+                  missing=("InvocationDoesNotExist",),
+              )
+
+          def cancel_inflight():
+              for command, instance in list(inflight.items()):
+                  aws("ssm", "cancel-command", "--command-id", command,
+                      "--instance-ids", instance)
+              deadline = time.monotonic() + 180
+              while inflight and time.monotonic() < deadline:
+                  for command, instance in list(inflight.items()):
+                      result = invocation(command, instance)
+                      if result and result["Status"] in terminal:
+                          del inflight[command]
+                  if inflight:
+                      time.sleep(10)
+              if inflight:
+                  raise RuntimeError("Could not confirm SSM cancellation; rollback stopped")
+
+          def deploy_instance(instance, release, deadline):
+              available = aws(
+                  "ssm", "describe-instance-information", "--filters",
+                  f"Key=InstanceIds,Values={instance}",
+              )["InstanceInformationList"]
+              if not any(item["PingStatus"] == "Online" for item in available):
+                  return False
+              remaining = int(deadline - time.monotonic())
+              if remaining < 120:
+                  raise RuntimeError("Insufficient time remaining to start deployment")
+              commands = [
+                  "set -eu",
+                  "timeout 600 cloud-init status --wait",
+                  "install -d -m 700 /opt/everyday",
+                  f"aws s3 cp s3://{bucket}/deployment/{release}/deploy.sh "
+                  "/opt/everyday/deploy.sh --region us-east-1 --only-show-errors",
+                  "chmod 700 /opt/everyday/deploy.sh",
+                  f"bash /opt/everyday/deploy.sh {release}",
+                  "docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'",
+              ]
+              response = aws(
+                  "ssm", "send-command", "--instance-ids", instance,
+                  "--document-name", "AWS-RunShellScript", "--timeout-seconds", "60",
+                  "--parameters", json.dumps({
+                      "commands": commands,
+                      "executionTimeout": [str(min(900, remaining - 60))],
+                  }),
+                  missing=("InvalidInstanceId",),
+              )
+              if response is None:
+                  return False
+              command = response["Command"]["CommandId"]
+              inflight[command] = instance
+              print(f"Deploying {release} to {instance}; command {command}", flush=True)
+              while time.monotonic() < deadline:
+                  result = invocation(command, instance)
+                  if result and result["Status"] in terminal:
+                      del inflight[command]
+                      print(result.get("StandardOutputContent", "")[-6000:])
+                      print(result.get("StandardErrorContent", "")[-6000:])
+                      if instance not in members(application_group()):
+                          return False
+                      if result["Status"] != "Success":
+                          raise RuntimeError(f"Deployment failed on {instance}: {result['Status']}")
+                      break
+                  time.sleep(10)
+              else:
+                  raise RuntimeError(f"Deployment timed out on {instance}")
+              while time.monotonic() < deadline:
+                  if instance not in members(application_group()):
+                      return False
+                  if healthy(instance):
+                      print(f"{instance}: deployment successful and ALB target healthy", flush=True)
+                      return True
+                  time.sleep(15)
+              raise RuntimeError(f"ALB target did not become healthy: {instance}")
+
+          def rollout(release):
+              deadline = time.monotonic() + 1200
+              verified = set()
+              stable = 0
+              while time.monotonic() < deadline:
+                  group = application_group()
+                  current = members(group)
+                  verified.intersection_update(current)
+                  for instance, state in current.items():
+                      if state == "InService" and instance not in verified:
+                          if deploy_instance(instance, release, deadline):
+                              verified.add(instance)
+                  group = application_group()
+                  current = members(group)
+                  ready = (
+                      len(current) >= group["DesiredCapacity"]
+                      and all(state == "InService" for state in current.values())
+                      and set(current).issubset(verified)
+                      and all(healthy(instance) for instance in current)
+                  )
+                  stable = stable + 1 if ready else 0
+                  if stable >= 2:
+                      return sorted(current)
+                  time.sleep(15)
+              raise RuntimeError("Application group did not converge within 20 minutes")
+
+          if not re.fullmatch(r"sha-[0-9a-f]{40}", tag):
+              raise RuntimeError("Invalid release tag")
+          previous = aws("ssm", "get-parameter", "--name", parameter)["Parameter"]["Value"]
+          if not re.fullmatch(r"sha-[0-9a-f]{40}", previous):
+              raise RuntimeError("Invalid previous release tag")
+          application_group()
+
+          # Publish both artifacts before allowing new instances to use this release.
+          with tempfile.TemporaryDirectory() as directory:
+              for source in ("infra/deploy.sh", "compose.aws.yaml"):
+                  destination = Path(directory) / Path(source).name
+                  destination.write_text(
+                      Path(source).read_text(encoding="utf-8-sig").replace("\r\n", "\n"),
+                      encoding="utf-8", newline="\n",
+                  )
+                  aws("s3", "cp", str(destination),
+                      f"s3://{bucket}/deployment/{tag}/{destination.name}",
+                      "--only-show-errors")
+
+          try:
+              # New scale-out instances now bootstrap with the same release.
+              set_release(tag)
+              instances = rollout(tag)
+          except Exception as error:
+              print(f"::error::Deployment failed: {error}", flush=True)
+              try:
+                  # Restore the startup release, then stop outstanding deployment commands.
+                  set_release(previous)
+                  cancel_inflight()
+                  restored = rollout(previous)
+                  print(f"Restored release {previous} on {', '.join(restored)}", flush=True)
+              except Exception as rollback_error:
+                  print(f"::error::Rollback needs attention: {rollback_error}", flush=True)
+              raise SystemExit(1)
+
+          print(f"Released {tag} to {', '.join(instances)}", flush=True)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  f"Deployed `{tag}` to **{len(instances)}** application instance(s).\n\n"
+                  + "\n".join(f"- `{instance}`: healthy" for instance in instances)
+                  + "\n"
+              )
+          PY

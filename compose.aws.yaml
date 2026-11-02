@@ -3,18 +3,17 @@ services:
     image: ${BACKEND_IMAGE}
     environment:
       NODE_ENV: production
-      PORT: 3001
+      PORT: "3001"
       DATABASE_URL: ${DATABASE_URL}
       DB_SSL: "true"
       DB_SSL_CA_PATH: /app/certs/global-bundle.pem
       CORS_ORIGINS: ${CORS_ORIGINS}
-      TRUST_PROXY_HOPS: "0"
+      TRUST_PROXY_HOPS: "2"
       DB_POOL_MAX: "5"
       RUN_MIGRATIONS: "true"
-      ATTACHMENT_STORAGE: ${ATTACHMENT_STORAGE:-s3}
-      AWS_REGION: ${AWS_REGION:-us-east-1}
-      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
-      LOCAL_UPLOAD_DIR: /app/uploads
+      ATTACHMENT_STORAGE: s3
+      AWS_REGION: us-east-1
+      S3_BUCKET_NAME: aws-cea-lab-dr
     expose:
       - "3001"
     restart: unless-stopped
